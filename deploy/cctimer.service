@@ -1,0 +1,29 @@
+[Unit]
+Description=cctimer - Claude Code periodic monitoring agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cctimer
+Group=cctimer
+WorkingDirectory=/opt/cctimer
+ExecStart=/usr/bin/node /opt/cctimer/dist/index.js
+Restart=on-failure
+RestartSec=30
+EnvironmentFile=-/etc/cctimer/env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/cctimer
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cctimer
+
+[Install]
+WantedBy=multi-user.target

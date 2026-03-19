@@ -1,0 +1,28 @@
+{
+  "name": "cctimer",
+  "version": "0.1.0",
+  "description": "Claude Code periodic monitoring agent - CC decides its own schedule",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "cctimer": "dist/index.js",
+    "cctimer-setup": "dist/setup.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "setup": "node dist/setup.js",
+    "dev": "tsx src/index.ts",
+    "dev:setup": "tsx src/setup.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  }
+}
