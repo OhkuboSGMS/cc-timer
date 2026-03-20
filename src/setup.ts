@@ -7,26 +7,34 @@
  *    - Inspects the system (services, timers, logs, etc.)
  *    - Interviews the user about what to monitor
  *    - Generates and saves monitoring configuration via MCP tool
+ * 3. Register as a system service or run in foreground
  */
 import "dotenv/config";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig } from "./config.js";
 import { StateManager } from "./state.js";
+import { getDirname } from "./paths.js";
 import { createInterface } from "node:readline";
 import { execSync, spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { userInfo, homedir } from "node:os";
 
+const __dirname = getDirname(import.meta.url);
 const config = loadConfig();
 const state = new StateManager(config);
 
 function prompt(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
+  return new Promise((res) => {
     rl.question(question, (answer) => {
       rl.close();
-      resolve(answer.trim());
+      res(answer.trim());
     });
   });
 }
+
+// --- Authentication ---
 
 interface AuthStatus {
   loggedIn: boolean;
@@ -87,6 +95,40 @@ async function ensureAuth(): Promise<void> {
   console.log(`\n認証完了: ${recheck.authMethod}`);
 }
 
+// --- OS-aware setup prompt ---
+
+function getSystemInvestigationHint(): string {
+  const platform = process.platform;
+
+  if (platform === "linux") {
+    return `このシステムは Linux です。以下のコマンドで調査を開始してください:
+   - \`systemctl list-units --type=service --state=running --no-pager\`
+   - \`systemctl list-units --type=service --state=failed --no-pager\`
+   - \`systemctl list-units --type=timer --no-pager\`
+   - \`df -h\` (ディスク使用量)
+   - \`free -h\` (メモリ)
+   - \`docker ps\` (Dockerコンテナがあれば)`;
+  }
+
+  if (platform === "darwin") {
+    return `このシステムは macOS です。以下のコマンドで調査を開始してください:
+   - \`launchctl list\` (起動中のサービス)
+   - \`df -h\` (ディスク使用量)
+   - \`vm_stat\` (メモリ状態)
+   - \`docker ps\` (Dockerコンテナがあれば)
+   - \`brew services list\` (Homebrew サービスがあれば)`;
+  }
+
+  // win32
+  return `このシステムは Windows です。PowerShell コマンドで調査してください。
+Bash ツールでは \`powershell -Command "..."\` の形式で実行できます。
+   - \`powershell -Command "Get-Service | Where-Object {\\$_.Status -eq 'Running'} | Select-Object -First 30"\`
+   - \`powershell -Command "Get-PSDrive -PSProvider FileSystem | Format-Table"\` (ディスク使用量)
+   - \`powershell -Command "Get-Process | Sort-Object WorkingSet -Descending | Select-Object -First 20 Name,@{N='MB';E={[math]::Round(\\$_.WorkingSet/1MB)}}"\` (メモリ使用量)
+   - \`docker ps\` (Dockerコンテナがあれば)
+   - \`powershell -Command "Get-ScheduledTask | Where-Object {\\$_.State -eq 'Ready'} | Select-Object -First 30"\` (スケジュールタスク)`;
+}
+
 function buildSetupPrompt(userHint: string): string {
   return `あなたは cctimer のセットアップエージェントです。
 ユーザーがこのマシンで定期監視したい内容を聞き取り、最適な監視設定を作成してください。
@@ -97,12 +139,7 @@ ${userHint || "（特になし）"}
 ## あなたのワークフロー
 
 1. **システム調査**: まず Bash でこのマシンの状態を調べてください。
-   - \`systemctl list-units --type=service --state=running --no-pager\`
-   - \`systemctl list-units --type=service --state=failed --no-pager\`
-   - \`systemctl list-units --type=timer --no-pager\`
-   - \`df -h\` (ディスク使用量)
-   - \`free -h\` (メモリ)
-   - \`docker ps\` (Dockerコンテナがあれば)
+${getSystemInvestigationHint()}
    - その他、ユーザーのヒントに関連するコマンド
 
 2. **調査結果の報告**: 見つかったサービス、タイマー、問題点をユーザーにわかりやすく報告してください。
@@ -127,6 +164,8 @@ ${userHint || "（特になし）"}
 - 必ず \`save_monitoring_config\` を呼んで設定を保存してから終了してください。`;
 }
 
+// --- Main setup flow ---
+
 async function setup(): Promise<void> {
   console.log("=== cctimer setup ===\n");
 
@@ -147,7 +186,7 @@ async function setup(): Promise<void> {
 
   console.log("\nエージェントがシステムを調査して、対話的に設定を作成します...\n");
 
-  const mcpServerPath = new URL("./mcp-server-entry.js", import.meta.url).pathname;
+  const mcpServerPath = resolve(__dirname, "mcp-server-entry.js");
 
   try {
     for await (const message of query({
@@ -181,7 +220,6 @@ async function setup(): Promise<void> {
                 });
               }
               const answer = await prompt("> ");
-              // 数字なら選択肢のラベルに変換
               const num = parseInt(answer, 10);
               if (q.options && num >= 1 && num <= q.options.length) {
                 answers[q.question] = q.options[num - 1].label;
@@ -210,7 +248,6 @@ async function setup(): Promise<void> {
     process.exit(1);
   }
 
-  // 結果確認
   const savedMemory = state.getMemory();
   if (!savedMemory) {
     console.error("\n設定が保存されませんでした。再度セットアップしてください。");
@@ -220,9 +257,16 @@ async function setup(): Promise<void> {
   console.log("\n=== セットアップ完了 ===");
   console.log(`設定保存先: ${config.dataDir}`);
 
-  // デーモン起動方法の選択
+  // --- OS別デーモン起動方法の選択 ---
+  const platform = process.platform;
+
+  const serviceLabel =
+    platform === "linux" ? "systemd サービスとして登録（推奨: 自動起動・自動復旧）" :
+    platform === "darwin" ? "launchd エージェントとして登録（推奨: 自動起動）" :
+    "Windows タスクスケジューラに登録（推奨: 自動起動）";
+
   console.log("\n監視デーモンの起動方法を選んでください:\n");
-  console.log("  1. systemd サービスとして登録（推奨: 自動起動・自動復旧）");
+  console.log(`  1. ${serviceLabel}`);
   console.log("  2. このままフォアグラウンドで起動（Ctrl+C で停止）");
   console.log("  3. 後で手動で起動する\n");
 
@@ -230,7 +274,9 @@ async function setup(): Promise<void> {
 
   switch (choice) {
     case "1": {
-      await installSystemdService();
+      if (platform === "linux") await installSystemdService();
+      else if (platform === "darwin") await installLaunchdAgent();
+      else await installWindowsTask();
       break;
     }
     case "2": {
@@ -241,21 +287,18 @@ async function setup(): Promise<void> {
     }
     default: {
       console.log("\n後で起動するには: npm start");
-      console.log("systemd 登録するには: node dist/setup.js --install-service");
       break;
     }
   }
 }
 
-async function installSystemdService(): Promise<void> {
-  const { execSync: exec } = await import("node:child_process");
-  const { resolve } = await import("node:path");
-  const { writeFileSync } = await import("node:fs");
+// --- Service installers ---
 
-  const projectDir = resolve(new URL(".", import.meta.url).pathname, "..");
+async function installSystemdService(): Promise<void> {
+  const projectDir = resolve(__dirname, "..");
   const nodeExec = process.execPath;
   const entryPoint = resolve(projectDir, "dist/index.js");
-  const user = process.env.USER || process.env.LOGNAME || "root";
+  const user = userInfo().username;
   const envFile = resolve(projectDir, ".env");
 
   const serviceContent = `[Unit]
@@ -289,19 +332,17 @@ WantedBy=multi-user.target
   console.log(`  実行ファイル: ${nodeExec} ${entryPoint}`);
 
   try {
-    // sudo が必要かチェック
     const needsSudo = process.getuid?.() !== 0;
     const sudo = needsSudo ? "sudo " : "";
 
-    // service ファイルを一時ファイルに書いてコピー
     const tmpPath = `/tmp/cctimer-${Date.now()}.service`;
     writeFileSync(tmpPath, serviceContent);
 
-    exec(`${sudo}cp ${tmpPath} ${servicePath}`, { stdio: "inherit" });
-    exec(`${sudo}systemctl daemon-reload`, { stdio: "inherit" });
-    exec(`${sudo}systemctl enable cctimer`, { stdio: "inherit" });
-    exec(`${sudo}systemctl start cctimer`, { stdio: "inherit" });
-    exec(`rm -f ${tmpPath}`);
+    execSync(`${sudo}cp ${tmpPath} ${servicePath}`, { stdio: "inherit" });
+    execSync(`${sudo}systemctl daemon-reload`, { stdio: "inherit" });
+    execSync(`${sudo}systemctl enable cctimer`, { stdio: "inherit" });
+    execSync(`${sudo}systemctl start cctimer`, { stdio: "inherit" });
+    execSync(`rm -f ${tmpPath}`);
 
     console.log("\n=== systemd サービス登録完了 ===");
     console.log("  状態確認: systemctl status cctimer");
@@ -312,6 +353,93 @@ WantedBy=multi-user.target
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`\nsystemd サービスの登録に失敗しました: ${errMsg}`);
     console.error("手動で登録するには: sudo deploy/install.sh");
+    process.exit(1);
+  }
+}
+
+async function installLaunchdAgent(): Promise<void> {
+  const projectDir = resolve(__dirname, "..");
+  const nodeExec = process.execPath;
+  const entryPoint = resolve(projectDir, "dist/index.js");
+  const logDir = resolve(homedir(), "Library/Logs/cctimer");
+
+  mkdirSync(logDir, { recursive: true });
+
+  const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cctimer.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${nodeExec}</string>
+    <string>${entryPoint}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${projectDir}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${logDir}/cctimer.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>${logDir}/cctimer.stderr.log</string>
+</dict>
+</plist>
+`;
+
+  const plistDir = resolve(homedir(), "Library/LaunchAgents");
+  mkdirSync(plistDir, { recursive: true });
+  const plistPath = resolve(plistDir, "com.cctimer.agent.plist");
+
+  console.log(`\nlaunchd エージェントを登録します...`);
+  console.log(`  plist: ${plistPath}`);
+  console.log(`  実行ファイル: ${nodeExec} ${entryPoint}`);
+  console.log(`  ログ: ${logDir}/`);
+
+  try {
+    writeFileSync(plistPath, plistContent);
+    execSync(`launchctl load "${plistPath}"`, { stdio: "inherit" });
+
+    console.log("\n=== launchd エージェント登録完了 ===");
+    console.log(`  状態確認: launchctl list | grep cctimer`);
+    console.log(`  ログ:     tail -f ${logDir}/cctimer.stdout.log`);
+    console.log(`  停止:     launchctl unload "${plistPath}"`);
+    console.log(`  削除:     rm "${plistPath}"`);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`\nlaunchd エージェントの登録に失敗しました: ${errMsg}`);
+    process.exit(1);
+  }
+}
+
+async function installWindowsTask(): Promise<void> {
+  const projectDir = resolve(__dirname, "..");
+  const nodeExec = process.execPath;
+  const entryPoint = resolve(projectDir, "dist", "index.js");
+  const taskName = "cctimer";
+
+  console.log(`\nWindows タスクスケジューラに登録します...`);
+  console.log(`  タスク名: ${taskName}`);
+  console.log(`  実行ファイル: ${nodeExec} ${entryPoint}`);
+
+  try {
+    execSync(
+      `schtasks /Create /TN "${taskName}" /TR "\\"${nodeExec}\\" \\"${entryPoint}\\"" /SC ONLOGON /F`,
+      { stdio: "inherit" }
+    );
+    execSync(`schtasks /Run /TN "${taskName}"`, { stdio: "inherit" });
+
+    console.log("\n=== Windows タスクスケジューラ登録完了 ===");
+    console.log(`  状態確認: schtasks /Query /TN "${taskName}"`);
+    console.log(`  停止:     schtasks /End /TN "${taskName}"`);
+    console.log(`  削除:     schtasks /Delete /TN "${taskName}" /F`);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`\nタスクスケジューラへの登録に失敗しました: ${errMsg}`);
+    console.error("管理者として実行してみてください。");
     process.exit(1);
   }
 }

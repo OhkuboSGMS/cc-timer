@@ -56,8 +56,12 @@ export class StateManager {
       try {
         process.kill(pid, 0);
         return true;
-      } catch {
-        // Process is dead, stale lock
+      } catch (e: any) {
+        if (e.code === "EPERM") {
+          // Process alive but owned by another user
+          return true;
+        }
+        // ESRCH = no such process, stale lock
         this.unlock();
         return false;
       }

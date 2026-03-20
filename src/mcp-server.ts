@@ -15,16 +15,20 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { resolve } from "node:path";
+import { getDirname } from "./paths.js";
 import type { CctimerConfig } from "./config.js";
 import { StateManager } from "./state.js";
 import { sendWebhook } from "./webhook.js";
+
+const __dirname = getDirname(import.meta.url);
 
 export function createMcpServerArgs(config: CctimerConfig): { command: string; args: string[] } {
   // The MCP server runs as a subprocess via tsx or node
   // We pass config via environment variables
   return {
     command: "node",
-    args: [new URL("./mcp-server-entry.js", import.meta.url).pathname],
+    args: [resolve(__dirname, "mcp-server-entry.js")],
   };
 }
 

@@ -5,8 +5,11 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, createWriteStream } from "node:fs";
 import { resolve } from "node:path";
+import { getDirname } from "./paths.js";
 import type { CctimerConfig } from "./config.js";
 import type { MonitoringMemory } from "./state.js";
+
+const __dirname = getDirname(import.meta.url);
 
 function buildMonitoringPrompt(memory: MonitoringMemory, runId: string): string {
   const checkTargets = memory.checkTargets.map((t) => `  - ${t}`).join("\n");
@@ -54,7 +57,7 @@ export async function runMonitoringAgent(
   const prompt = buildMonitoringPrompt(memory, runId);
 
   // Resolve the MCP server entry point path
-  const mcpServerPath = new URL("./mcp-server-entry.js", import.meta.url).pathname;
+  const mcpServerPath = resolve(__dirname, "mcp-server-entry.js");
 
   console.log(`[cctimer] Starting monitoring run ${runId}`);
 
