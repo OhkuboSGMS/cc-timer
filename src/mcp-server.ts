@@ -145,6 +145,33 @@ export async function startMcpServer(config: CctimerConfig): Promise<void> {
           required: ["summary", "issues_found"],
         },
       },
+      {
+        name: "save_monitoring_config",
+        description:
+          "Save the monitoring configuration. Used during setup to persist the monitoring " +
+          "targets and instructions that the agent has gathered from the user and system inspection. " +
+          "This also sets the initial schedule to run immediately.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            instructions: {
+              type: "string",
+              description: "Detailed monitoring instructions for future runs",
+            },
+            check_targets: {
+              type: "array",
+              items: { type: "string" },
+              description: "List of specific things to monitor (services, logs, metrics, etc.)",
+            },
+            additional_notes: {
+              type: "array",
+              items: { type: "string" },
+              description: "Any additional notes from system inspection",
+            },
+          },
+          required: ["instructions", "check_targets"],
+        },
+      },
     ],
   }));
 
@@ -250,6 +277,30 @@ export async function startMcpServer(config: CctimerConfig): Promise<void> {
 
         return {
           content: [{ type: "text" as const, text: `Run result recorded. Issues found: ${issuesFound}` }],
+        };
+      }
+
+      case "save_monitoring_config": {
+        const instructions = args?.instructions as string;
+        const checkTargets = args?.check_targets as string[];
+        const additionalNotes = (args?.additional_notes as string[]) || [];
+
+        const memory = {
+          instructions,
+          checkTargets,
+          additionalNotes,
+          updatedAt: new Date().toISOString(),
+        };
+        state.setMemory(memory);
+        state.setNextRun(new Date());
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Monitoring config saved. Targets: ${checkTargets.join(", ")}. Initial run scheduled.`,
+            },
+          ],
         };
       }
 

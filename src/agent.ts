@@ -3,6 +3,8 @@
  */
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, createWriteStream } from "node:fs";
+import { resolve } from "node:path";
 import type { CctimerConfig } from "./config.js";
 import type { MonitoringMemory } from "./state.js";
 
@@ -56,6 +58,21 @@ export async function runMonitoringAgent(
 
   console.log(`[cctimer] Starting monitoring run ${runId}`);
 
+  // ラン毎のログディレクトリ
+  const runsDir = resolve(config.dataDir, "runs");
+  mkdirSync(runsDir, { recursive: true });
+  const logPath = resolve(runsDir, `${runId}.log`);
+  const logStream = createWriteStream(logPath, { flags: "w" });
+
+  function writeLog(line: string): void {
+    logStream.write(`[${new Date().toISOString()}] ${line}\n`);
+  }
+
+  writeLog(`=== Monitoring Run ${runId} ===`);
+  writeLog(`Started: ${startedAt}`);
+  writeLog(`Work dir: ${config.workDir}`);
+  writeLog("");
+
   const outputParts: string[] = [];
 
   try {
@@ -82,16 +99,29 @@ export async function runMonitoringAgent(
         for (const block of message.message.content) {
           if ("text" in block) {
             outputParts.push(block.text as string);
+            writeLog(`[assistant] ${block.text}`);
+          } else if ("type" in block && block.type === "tool_use") {
+            const tb = block as any;
+            writeLog(`[tool_call] ${tb.name}(${JSON.stringify(tb.input)})`);
           }
         }
       } else if (message.type === "result") {
-        console.log(`[cctimer] Run ${runId} completed: ${(message as any).subtype}`);
+        const subtype = (message as any).subtype;
+        writeLog(`[result] ${subtype}`);
+        console.log(`[cctimer] Run ${runId} completed: ${subtype}`);
       }
     }
+
+    writeLog("");
+    writeLog(`=== Run ${runId} finished successfully ===`);
+    logStream.end();
 
     return { runId, success: true, output: outputParts.join("\n") };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    writeLog(`[error] ${errMsg}`);
+    writeLog(`=== Run ${runId} failed ===`);
+    logStream.end();
     console.error(`[cctimer] Run ${runId} failed:`, errMsg);
     return { runId, success: false, output: errMsg };
   }

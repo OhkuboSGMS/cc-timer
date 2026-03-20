@@ -63,16 +63,11 @@ async function runOnce(): Promise<void> {
   }
 }
 
-async function daemon(): Promise<void> {
+export async function daemon(): Promise<void> {
   log("cctimer daemon starting.");
   log(`Data dir: ${config.dataDir}`);
   log(`Work dir: ${config.workDir}`);
   log(`Default interval: ${config.defaultIntervalMin}min`);
-
-  if (!config.anthropicApiKey) {
-    log("ERROR: ANTHROPIC_API_KEY is not set.");
-    process.exit(1);
-  }
 
   if (!state.isSetupComplete()) {
     log("Setup not complete. Run 'cctimer-setup' first.");
@@ -118,8 +113,11 @@ async function daemon(): Promise<void> {
   log("cctimer daemon stopped.");
 }
 
-// If run directly
-daemon().catch((err) => {
-  console.error("[cctimer] Fatal error:", err);
-  process.exit(1);
-});
+// If run directly (not imported)
+const isDirectRun = process.argv[1]?.endsWith("index.js");
+if (isDirectRun) {
+  daemon().catch((err) => {
+    console.error("[cctimer] Fatal error:", err);
+    process.exit(1);
+  });
+}
