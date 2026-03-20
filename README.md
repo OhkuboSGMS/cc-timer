@@ -1,4 +1,4 @@
-# cctimer
+# cc-timer
 
 Claude Code Agent SDK を使った定期監視デーモン。CC エージェントが自分で次回実行間隔を決める。
 
